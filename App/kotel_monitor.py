@@ -105,7 +105,7 @@ class App(tk.Tk):
         super().__init__()
         self.title("🔥 Kotel Monitor")
         self.configure(bg=BG)
-        self.resizable(False, False)
+        self.resizable(True, True)
 
         self._temps = {"A0": None, "A1": None, "A2": None}
         self._alert_shown = False
@@ -131,7 +131,7 @@ class App(tk.Tk):
 
         # Tři panely
         panels = tk.Frame(self, bg=BG)
-        panels.pack(padx=16, pady=(0, 16))
+        panels.pack(fill="both", expand=True, padx=16, pady=(0, 16))
 
         channels = [
             ("A0", "KOTEL",      ACCENT_K),
@@ -146,7 +146,7 @@ class App(tk.Tk):
                              highlightbackground=BORDER,
                              highlightthickness=1,
                              padx=14, pady=14)
-            panel.pack(side="left", padx=8)
+            panel.pack(side="left", padx=8, fill="both", expand=True)
 
             tk.Label(panel, text=name, bg=PANEL_BG, fg=color,
                      font=FONT_HEAD).pack()
