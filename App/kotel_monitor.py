@@ -413,7 +413,7 @@ class App(tk.Tk):
                 f"Teplota AKU nádrže je pod {WARNING_AKU} °C\n"
                 f"a teplota spalin je pouze {spaliny_temp:.1f} °C\n"
                 f"(minimum: {WARNING_SPALINY} °C).\n\n"
-                "Hrozí kondenzace a poškození komína!",
+                "Hrozí vyhasnutí kotle!",
                 parent=self,
             )
         self.after(0, _show)
