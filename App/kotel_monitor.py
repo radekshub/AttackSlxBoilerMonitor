@@ -3,7 +3,7 @@ Kotel Monitor - Sledování teplot kotle, AKU nádrže a spalin
 Sériový port COM3, 300 baud, 8N1
 
 Závislosti:
-    pip install pyserial matplotlib
+    pip install pyserial
 
 Spuštění:
     python kotel_monitor.py
@@ -16,7 +16,7 @@ import serial
 import re
 import time
 import math
-import winsound  # Windows beep
+import winsound  # Windows beep (na Linuxu zakomentovat)
 
 # ── Kalibrace (lineární interpolace mezi dvěma body) ──────────────────────────
 CALIB = {
@@ -37,68 +37,101 @@ PANEL_BG  = "#161b22"
 BORDER    = "#30363d"
 TEXT_FG   = "#e6edf3"
 MUTED     = "#8b949e"
-ACCENT_K  = "#f97316"   # oranžová – kotel
-ACCENT_A  = "#3b82f6"   # modrá – AKU
-ACCENT_S  = "#22c55e"   # zelená – spaliny (normální)
-ACCENT_SW = "#ef4444"   # červená – spaliny (varování)
-FONT_MONO = ("Courier New", 11)
-FONT_VAL  = ("Courier New", 28, "bold")
-FONT_LBL  = ("Courier New", 10)
-FONT_HEAD = ("Courier New", 13, "bold")
+ACCENT_K  = "#f97316"
+ACCENT_A  = "#3b82f6"
+ACCENT_S  = "#22c55e"
+ACCENT_SW = "#ef4444"
 
-# Meze pro gauge
-GAUGE_MIN = {"A0": 0,  "A1": 0,  "A2": 0}
+GAUGE_MIN = {"A0": 0,   "A1": 0,   "A2": 0}
 GAUGE_MAX = {"A0": 120, "A1": 120, "A2": 400}
 
-WARNING_AKU   = 70    # °C – pod touto hranicí hlídat spaliny
-WARNING_SPALINY = 160  # °C – pod touto hranicí varování
+WARNING_AKU     = 70
+WARNING_SPALINY = 160
+
 
 class GaugeCanvas(tk.Canvas):
-    """Kruhový gauge s obloukem a číselnou hodnotou."""
+    """Kruhový gauge – překresluje se proporcionálně při každé změně velikosti."""
 
     def __init__(self, parent, channel, color, **kw):
-        size = 220
-        super().__init__(parent, width=size, height=size,
-                         bg=PANEL_BG, highlightthickness=0, **kw)
-        self.ch     = channel
-        self.color  = color
-        self.size   = size
-        self.value  = None
-        self._draw_static()
+        super().__init__(parent, bg=PANEL_BG, highlightthickness=0, **kw)
+        self.ch        = channel
+        self.color     = color
+        self._temp     = None
+        self._warn_clr = None
+        self.bind("<Configure>", self._on_resize)
 
-    def _draw_static(self):
-        s = self.size
-        pad = 22
-        self._arc_bbox = (pad, pad, s - pad, s - pad)
+    def _on_resize(self, event=None):
+        self._redraw()
+
+    def update_value(self, temp: float, warn_color=None):
+        self._temp     = temp
+        self._warn_clr = warn_color
+        self._redraw()
+
+    def _redraw(self):
+        self.delete("all")
+        w = self.winfo_width()
+        h = self.winfo_height()
+        if w < 10 or h < 10:
+            return
+
+        size = min(w, h)
+        cx   = w / 2
+        cy   = h / 2
+
+        pad    = size * 0.10
+        arc_w  = max(4, int(size * 0.055))
+        x0, y0 = cx - size / 2 + pad, cy - size / 2 + pad
+        x1, y1 = cx + size / 2 - pad, cy + size / 2 - pad
+
         # Pozadí oblouku (šedá dráha)
-        self.create_arc(*self._arc_bbox, start=225, extent=-270,
-                        style="arc", outline=BORDER, width=12,
-                        tags="static")
+        self.create_arc(x0, y0, x1, y1, start=225, extent=-270,
+                        style="arc", outline=BORDER, width=arc_w)
 
-    def update_value(self, temp: float, warn_color: str | None = None):
-        self.delete("dynamic")
-        s    = self.size
+        # Min / max popisky
+        font_small = ("Courier New", max(7, int(size * 0.07)))
         vmin = GAUGE_MIN[self.ch]
         vmax = GAUGE_MAX[self.ch]
-        frac = max(0.0, min(1.0, (temp - vmin) / (vmax - vmin)))
+        self.create_text(x0 + 2, y1 + 4, text=f"{vmin}°",
+                         fill=MUTED, font=font_small, anchor="nw")
+        self.create_text(x1 - 2, y1 + 4, text=f"{vmax}°",
+                         fill=MUTED, font=font_small, anchor="ne")
 
-        arc_color = warn_color if warn_color else self.color
-        extent = -270 * frac
+        if self._temp is None:
+            font_val = ("Courier New", max(10, int(size * 0.14)), "bold")
+            self.create_text(cx, cy, text="–", fill=MUTED, font=font_val)
+            return
+
+        arc_color = self._warn_clr if self._warn_clr else self.color
+        frac      = max(0.0, min(1.0, (self._temp - vmin) / (vmax - vmin)))
+        extent    = -270 * frac
 
         # Barevný oblouk
         if frac > 0:
-            self.create_arc(*self._arc_bbox, start=225, extent=extent,
-                            style="arc", outline=arc_color, width=12,
-                            tags="dynamic")
+            self.create_arc(x0, y0, x1, y1, start=225, extent=extent,
+                            style="arc", outline=arc_color, width=arc_w)
 
-        # Hodnota
-        cx, cy = s / 2, s / 2 + 10
-        self.create_text(cx, cy - 10,
-                         text=f"{temp:.1f}°C",
-                         fill=arc_color,
-                         font=FONT_VAL,
-                         tags="dynamic")
-        self.value = temp
+        # Jehla
+        angle_rad = math.radians(225 - 270 * frac)
+        r_needle  = (size / 2 - pad) * 0.80
+        nx = cx + r_needle * math.cos(angle_rad)
+        ny = cy - r_needle * math.sin(angle_rad)
+        needle_w = max(2, int(size * 0.018))
+        self.create_line(cx, cy, nx, ny, fill=arc_color, width=needle_w)
+        dot = max(3, int(size * 0.025))
+        self.create_oval(cx - dot, cy - dot, cx + dot, cy + dot,
+                         fill=arc_color, outline="")
+
+        # Číselná hodnota a jednotka
+        font_val  = ("Courier New", max(10, int(size * 0.14)), "bold")
+        font_unit = ("Courier New", max(7,  int(size * 0.07)))
+        self.create_text(cx, cy + size * 0.18,
+                         text=f"{self._temp:.1f}",
+                         fill=arc_color, font=font_val)
+        self.create_text(cx, cy + size * 0.32,
+                         text="°C",
+                         fill=arc_color, font=font_unit)
+
 
 class App(tk.Tk):
     def __init__(self):
@@ -106,11 +139,11 @@ class App(tk.Tk):
         self.title("🔥 Kotel Monitor")
         self.configure(bg=BG)
         self.resizable(True, True)
+        self.minsize(480, 320)
 
-        self._temps = {"A0": None, "A1": None, "A2": None}
+        self._temps       = {"A0": None, "A1": None, "A2": None}
         self._alert_shown = False
-        self._serial_thread = None
-        self._running = True
+        self._running     = True
 
         self._build_ui()
         self._start_serial()
@@ -120,66 +153,69 @@ class App(tk.Tk):
 
     def _build_ui(self):
         # Hlavička
-        header = tk.Frame(self, bg=BG, pady=12)
+        header = tk.Frame(self, bg=BG, pady=10)
         header.pack(fill="x", padx=20)
         tk.Label(header, text="KOTEL MONITOR", bg=BG, fg=TEXT_FG,
                  font=("Courier New", 18, "bold")).pack(side="left")
-        self._status_lbl = tk.Label(header, text="● ODPOJENO", bg=BG,
-                                    fg="#ef4444",
-                                    font=FONT_LBL)
+        self._status_lbl = tk.Label(header, text="● ODPOJENO",
+                                    bg=BG, fg="#ef4444",
+                                    font=("Courier New", 10))
         self._status_lbl.pack(side="right", padx=4)
 
-        # Tři panely
+        # Tři panely s gaugy – grid, roztahují se s oknem
         panels = tk.Frame(self, bg=BG)
-        panels.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+        panels.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        panels.columnconfigure(0, weight=1)
+        panels.columnconfigure(1, weight=1)
+        panels.columnconfigure(2, weight=1)
+        panels.rowconfigure(0, weight=1)
 
         channels = [
-            ("A0", "KOTEL",      ACCENT_K),
-            ("A1", "AKU NÁDRŽ",  ACCENT_A),
-            ("A2", "SPALINY",    ACCENT_S),
+            ("A0", "KOTEL",     ACCENT_K),
+            ("A1", "AKU NÁDRŽ", ACCENT_A),
+            ("A2", "SPALINY",   ACCENT_S),
         ]
-        self._gauges = {}
+        self._gauges    = {}
         self._volt_lbls = {}
 
-        for ch, name, color in channels:
+        for col, (ch, name, color) in enumerate(channels):
             panel = tk.Frame(panels, bg=PANEL_BG,
                              highlightbackground=BORDER,
-                             highlightthickness=1,
-                             padx=14, pady=14)
-            panel.pack(side="left", padx=8, fill="both", expand=True)
+                             highlightthickness=1)
+            panel.grid(row=0, column=col, sticky="nsew", padx=6, pady=4)
+            panel.columnconfigure(0, weight=1)
+            panel.rowconfigure(1, weight=1)  # gauge row se roztahuje
 
             tk.Label(panel, text=name, bg=PANEL_BG, fg=color,
-                     font=FONT_HEAD).pack()
+                     font=("Courier New", 12, "bold"), pady=6).grid(
+                     row=0, column=0, sticky="ew")
 
             g = GaugeCanvas(panel, ch, color)
-            g.pack(pady=4)
+            g.grid(row=1, column=0, sticky="nsew", padx=10, pady=4)
             self._gauges[ch] = g
 
             v_lbl = tk.Label(panel, text="– V", bg=PANEL_BG,
-                             fg=MUTED, font=FONT_MONO)
-            v_lbl.pack()
+                             fg=MUTED, font=("Courier New", 10), pady=6)
+            v_lbl.grid(row=2, column=0)
             self._volt_lbls[ch] = v_lbl
 
         # Log okno
         log_frame = tk.Frame(self, bg=PANEL_BG,
-                             highlightbackground=BORDER,
-                             highlightthickness=1)
-        log_frame.pack(fill="x", padx=16, pady=(0, 16))
+                             highlightbackground=BORDER, highlightthickness=1)
+        log_frame.pack(fill="x", padx=12, pady=(0, 10))
         tk.Label(log_frame, text="LOG", bg=PANEL_BG, fg=MUTED,
-                 font=FONT_LBL, anchor="w").pack(fill="x", padx=8, pady=(4, 0))
-        self._log = tk.Text(log_frame, height=5, bg="#0d1117",
+                 font=("Courier New", 9), anchor="w").pack(
+                 fill="x", padx=8, pady=(4, 0))
+        self._log = tk.Text(log_frame, height=4, bg="#0d1117",
                             fg=MUTED, font=("Courier New", 9),
                             insertbackground=TEXT_FG,
-                            relief="flat", state="disabled",
-                            wrap="word")
+                            relief="flat", state="disabled", wrap="word")
         self._log.pack(fill="x", padx=6, pady=(0, 6))
 
     # ── Sériová komunikace ────────────────────────────────────────────────────
 
     def _start_serial(self):
-        self._serial_thread = threading.Thread(target=self._read_serial,
-                                                daemon=True)
-        self._serial_thread.start()
+        threading.Thread(target=self._read_serial, daemon=True).start()
 
     def _read_serial(self):
         port = "COM3"
@@ -187,8 +223,7 @@ class App(tk.Tk):
             try:
                 self._log_msg(f"Připojuji se k {port} 300 baud…")
                 with serial.Serial(port, baudrate=300, bytesize=8,
-                                   parity="N", stopbits=1,
-                                   timeout=3) as ser:
+                                   parity="N", stopbits=1, timeout=3) as ser:
                     self.after(0, self._set_connected, True)
                     self._log_msg("Připojeno.")
                     while self._running:
@@ -202,9 +237,7 @@ class App(tk.Tk):
                 time.sleep(5)
 
     def _parse_line(self, line: str):
-        """Parsuje 'A0: 2.087 V  |  A1: 2.488 V  |  A2: 1.349 V'"""
-        pattern = r"A(\d):\s*([\d.]+)\s*V"
-        matches = re.findall(pattern, line)
+        matches = re.findall(r"A(\d):\s*([\d.]+)\s*V", line)
         if not matches:
             return
         data = {}
@@ -212,8 +245,7 @@ class App(tk.Tk):
             ch = f"A{idx}"
             if ch in CALIB:
                 v = float(volt_str)
-                t = voltage_to_temp(ch, v)
-                data[ch] = (v, t)
+                data[ch] = (v, voltage_to_temp(ch, v))
         if data:
             self.after(0, self._update_display, data)
 
@@ -224,27 +256,16 @@ class App(tk.Tk):
             self._temps[ch] = temp
             self._volt_lbls[ch].config(text=f"{volt:.3f} V")
 
-        # Určit barvu spalin
-        spaliny_warn = False
-        aku_temp = self._temps.get("A1")
+        aku_temp     = self._temps.get("A1")
         spaliny_temp = self._temps.get("A2")
-
-        if (aku_temp is not None and aku_temp < WARNING_AKU and
-                spaliny_temp is not None and spaliny_temp < WARNING_SPALINY):
-            spaliny_warn = True
+        spaliny_warn = (aku_temp is not None and aku_temp < WARNING_AKU and
+                        spaliny_temp is not None and spaliny_temp < WARNING_SPALINY)
 
         for ch, (volt, temp) in data.items():
-            warn_color = None
-            if ch == "A2" and spaliny_warn:
-                warn_color = ACCENT_SW
-                # Přebarvit panel – upravit barvu popisku
-                self._volt_lbls[ch].config(fg=ACCENT_SW)
-            else:
-                if ch == "A2":
-                    self._volt_lbls[ch].config(fg=MUTED)
+            warn_color = ACCENT_SW if (ch == "A2" and spaliny_warn) else None
+            self._volt_lbls[ch].config(fg=warn_color if warn_color else MUTED)
             self._gauges[ch].update_value(temp, warn_color)
 
-        # Varování
         if spaliny_warn and not self._alert_shown:
             self._alert_shown = True
             self._trigger_alert(spaliny_temp)
@@ -253,7 +274,6 @@ class App(tk.Tk):
 
     def _trigger_alert(self, spaliny_temp: float):
         def _show():
-            # Pipnutí (Windows)
             try:
                 winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
             except Exception:
