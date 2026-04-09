@@ -50,8 +50,8 @@ GAUGE_MAX = {"A0": 100, "A1": 100, "A2": 250}
 WARNING_AKU     = 70
 WARNING_SPALINY = 160
 
-HISTORY_SECONDS  = 8 * 3600   # 8 hodin
-RECORD_INTERVAL  = 30          # každých 30 s zaznamenat bod
+HISTORY_SECONDS = 8 * 3600   # 8 hodin
+RECORD_INTERVAL = 30          # každých 30 s zaznamenat bod
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -124,34 +124,31 @@ class GaugeCanvas(tk.Canvas):
 # ══════════════════════════════════════════════════════════════════════════════
 class HistoryChart(tk.Canvas):
     """
-    Čárový graf s osou X = čas (8 h), levá osa Y = 10–100 °C (kotel + AKU),
-    pravá osa Y = 100–250 °C (spaliny). Překresluje se při resize.
+    Čárový graf – osa X = čas (8 h), levá osa Y = 20–100 °C,
+    pravá osa Y = 100–250 °C (spaliny).
     """
 
-    # okraje plátna
-    PAD_L  = 52   # místo pro levou osu
-    PAD_R  = 52   # místo pro pravou osu
-    PAD_T  = 14
-    PAD_B  = 36   # místo pro osu X
+    PAD_L = 48
+    PAD_R = 48
+    PAD_T = 18
+    PAD_B = 32
 
-    Y_LEFT_MIN,  Y_LEFT_MAX  = 10,  100
+    Y_LEFT_MIN,  Y_LEFT_MAX  = 20,  100
     Y_RIGHT_MIN, Y_RIGHT_MAX = 100, 250
 
     def __init__(self, parent, **kw):
         super().__init__(parent, bg=PANEL_BG, highlightthickness=0, **kw)
-        # deques: každý prvek je (timestamp_float, temp_float)
         maxlen = HISTORY_SECONDS // RECORD_INTERVAL + 10
         self._hist = {
             "A0": collections.deque(maxlen=maxlen),
             "A1": collections.deque(maxlen=maxlen),
             "A2": collections.deque(maxlen=maxlen),
         }
-        self._colors = {"A0": ACCENT_K, "A1": ACCENT_A, "A2": ACCENT_S}
+        self._colors       = {"A0": ACCENT_K, "A1": ACCENT_A, "A2": ACCENT_S}
         self._warn_spaliny = False
         self.bind("<Configure>", lambda e: self._redraw())
 
     def add_point(self, temps: dict, warn_spaliny: bool):
-        """Přidá bod do historie. temps = {"A0": float, ...}"""
         now = time.time()
         for ch, t in temps.items():
             if t is not None:
@@ -163,83 +160,87 @@ class HistoryChart(tk.Canvas):
         self.delete("all")
         w = self.winfo_width()
         h = self.winfo_height()
-        if w < 40 or h < 40:
+        if w < 60 or h < 40:
             return
 
-        pl = self.PAD_L
-        pr = self.PAD_R
-        pt = self.PAD_T
-        pb = self.PAD_B
-        cw = w - pl - pr   # šířka grafu
-        ch = h - pt - pb   # výška grafu
+        pl, pr, pt, pb = self.PAD_L, self.PAD_R, self.PAD_T, self.PAD_B
+        cw = w - pl - pr
+        ch = h - pt - pb
+        if cw < 10 or ch < 10:
+            return
 
         now    = time.time()
         t_from = now - HISTORY_SECONDS
 
         def x_pos(ts):
-            return pl + (ts - t_from) / HISTORY_SECONDS * cw
+            return pl + max(0.0, min(1.0, (ts - t_from) / HISTORY_SECONDS)) * cw
 
         def y_left(val):
             frac = (val - self.Y_LEFT_MIN) / (self.Y_LEFT_MAX - self.Y_LEFT_MIN)
-            return pt + ch - frac * ch
+            return pt + ch - max(0.0, min(1.0, frac)) * ch
 
         def y_right(val):
             frac = (val - self.Y_RIGHT_MIN) / (self.Y_RIGHT_MAX - self.Y_RIGHT_MIN)
-            return pt + ch - frac * ch
+            return pt + ch - max(0.0, min(1.0, frac)) * ch
 
-        # ── mřížka ────────────────────────────────────────────────────────────
         font_ax = ("Courier New", 8)
 
-        # vodorovné čáry – levá osa (každých 10 °C)
+        # Vodorovné čáry + levá osa (každých 10 °C od 20 do 100)
         for val in range(self.Y_LEFT_MIN, self.Y_LEFT_MAX + 1, 10):
             y = y_left(val)
-            self.create_line(pl, y, pl+cw, y, fill=GRID_CLR, dash=(2, 4))
+            self.create_line(pl, y, pl + cw, y, fill=GRID_CLR, dash=(2, 4))
             self.create_text(pl - 4, y, text=str(val), fill=MUTED,
                              font=font_ax, anchor="e")
 
-        # pravá osa (každých 25 °C)
+        # Pravá osa (každých 25 °C od 100 do 250)
         for val in range(self.Y_RIGHT_MIN, self.Y_RIGHT_MAX + 1, 25):
             y = y_right(val)
-            self.create_text(pl + cw + 4, y, text=str(val), fill=ACCENT_S,
-                             font=font_ax, anchor="w")
+            self.create_text(pl + cw + 4, y, text=str(val),
+                             fill=ACCENT_S, font=font_ax, anchor="w")
 
-        # svislé čáry – každou hodinu
+        # Svislé čáry + popisky hodin (Windows-safe strftime)
         for h_ago in range(0, 9):
             ts = now - h_ago * 3600
             x  = x_pos(ts)
             if pl <= x <= pl + cw:
-                self.create_line(x, pt, x, pt+ch, fill=GRID_CLR, dash=(2, 4))
-                label = time.strftime("%-H:%M", time.localtime(ts))
-                self.create_text(x, pt+ch+4, text=label, fill=MUTED,
-                                 font=font_ax, anchor="n")
+                self.create_line(x, pt, x, pt + ch, fill=GRID_CLR, dash=(2, 4))
+                label = time.strftime("%H:%M", time.localtime(ts))
+                self.create_text(x, pt + ch + 4, text=label,
+                                 fill=MUTED, font=font_ax, anchor="n")
 
-        # ── rámeček grafu ─────────────────────────────────────────────────────
-        self.create_rectangle(pl, pt, pl+cw, pt+ch, outline=BORDER, width=1)
+        # Rámeček
+        self.create_rectangle(pl, pt, pl + cw, pt + ch,
+                              outline=BORDER, width=1)
 
-        # popisky os
-        self.create_text(pl - 40, pt + ch//2, text="°C", fill=MUTED,
-                         font=("Courier New", 9), angle=90, anchor="center")
-        self.create_text(pl + cw + 40, pt + ch//2,
-                         text="°C spaliny", fill=ACCENT_S,
-                         font=("Courier New", 9), angle=90, anchor="center")
-
-        # legenda
+        # Legenda
+        legend_items = [("A0", "Kotel"), ("A1", "AKU"), ("A2", "Spaliny")]
         lx = pl + 8
-        for ch_name, label in [("A0","Kotel"),("A1","AKU"),("A2","Spaliny")]:
+        for ch_name, label in legend_items:
             clr = (ACCENT_SW if ch_name == "A2" and self._warn_spaliny
                    else self._colors[ch_name])
-            self.create_line(lx, pt+8, lx+18, pt+8, fill=clr, width=2)
-            self.create_text(lx+22, pt+8, text=label, fill=clr,
-                             font=font_ax, anchor="w")
-            lx += 70
+            self.create_line(lx, pt + 10, lx + 16, pt + 10,
+                             fill=clr, width=2)
+            self.create_text(lx + 20, pt + 10, text=label,
+                             fill=clr, font=font_ax, anchor="w")
+            lx += 65
 
-        # ── křivky ────────────────────────────────────────────────────────────
+        # Křivky
         for ch_name, deq in self._hist.items():
             pts = [(ts, t) for ts, t in deq if ts >= t_from]
             if len(pts) < 2:
+                # Aspoň jeden bod — nakresli tečku
+                if len(pts) == 1:
+                    ts, t = pts[0]
+                    clr = (ACCENT_SW if ch_name == "A2" and self._warn_spaliny
+                           else self._colors[ch_name])
+                    y_fn = y_right if ch_name == "A2" else y_left
+                    px, py = x_pos(ts), y_fn(t)
+                    self.create_oval(px-3, py-3, px+3, py+3,
+                                     fill=clr, outline="")
                 continue
-            clr = (ACCENT_SW if ch_name == "A2" and self._warn_spaliny
-                   else self._colors[ch_name])
+
+            clr  = (ACCENT_SW if ch_name == "A2" and self._warn_spaliny
+                    else self._colors[ch_name])
             y_fn = y_right if ch_name == "A2" else y_left
             coords = []
             for ts, t in pts:
@@ -254,12 +255,13 @@ class App(tk.Tk):
         self.title("🔥 Kotel Monitor")
         self.configure(bg=BG)
         self.resizable(True, True)
-        self.minsize(560, 420)
+        self.minsize(560, 480)
 
-        self._temps       = {"A0": None, "A1": None, "A2": None}
-        self._alert_shown = False
-        self._running     = True
-        self._last_record = 0.0   # timestamp posledního záznamu do grafu
+        self._temps        = {"A0": None, "A1": None, "A2": None}
+        self._alert_shown  = False
+        self._running      = True
+        # Nastavíme na 0 → první příchozí data se okamžitě zapíší do grafu
+        self._last_record  = 0.0
 
         self._build_ui()
         self._start_serial()
@@ -268,7 +270,6 @@ class App(tk.Tk):
     # ── UI ────────────────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        # Hlavička
         header = tk.Frame(self, bg=BG, pady=10)
         header.pack(fill="x", padx=20)
         tk.Label(header, text="KOTEL MONITOR", bg=BG, fg=TEXT_FG,
@@ -278,15 +279,15 @@ class App(tk.Tk):
                                     font=("Courier New", 10))
         self._status_lbl.pack(side="right", padx=4)
 
-        # Tři panely s gaugy
+        # Gaugy
         panels = tk.Frame(self, bg=BG)
         panels.pack(fill="both", expand=True, padx=12, pady=(0, 6))
-        panels.columnconfigure(0, weight=1)
-        panels.columnconfigure(1, weight=1)
-        panels.columnconfigure(2, weight=1)
+        for i in range(3):
+            panels.columnconfigure(i, weight=1)
         panels.rowconfigure(0, weight=1)
 
-        channels = [("A0","KOTEL",ACCENT_K), ("A1","AKU NÁDRŽ",ACCENT_A),
+        channels = [("A0","KOTEL",ACCENT_K),
+                    ("A1","AKU NÁDRŽ",ACCENT_A),
                     ("A2","SPALINY",ACCENT_S)]
         self._gauges    = {}
         self._volt_lbls = {}
@@ -311,7 +312,7 @@ class App(tk.Tk):
             v_lbl.grid(row=2, column=0)
             self._volt_lbls[ch] = v_lbl
 
-        # ── Historický graf ───────────────────────────────────────────────────
+        # Historický graf
         chart_frame = tk.Frame(self, bg=PANEL_BG,
                                highlightbackground=BORDER, highlightthickness=1)
         chart_frame.pack(fill="x", padx=12, pady=(0, 6))
@@ -322,7 +323,7 @@ class App(tk.Tk):
         self._chart = HistoryChart(chart_frame, height=180)
         self._chart.pack(fill="x", padx=6, pady=(2, 6))
 
-        # ── Log ───────────────────────────────────────────────────────────────
+        # Log
         log_frame = tk.Frame(self, bg=PANEL_BG,
                              highlightbackground=BORDER, highlightthickness=1)
         log_frame.pack(fill="x", padx=12, pady=(0, 10))
@@ -389,7 +390,7 @@ class App(tk.Tk):
             self._volt_lbls[ch].config(fg=warn_color if warn_color else MUTED)
             self._gauges[ch].update_value(temp, warn_color)
 
-        # Záznam do grafu každých RECORD_INTERVAL sekund
+        # Záznam do grafu — hned při prvním příjmu, pak každých RECORD_INTERVAL s
         now = time.time()
         if now - self._last_record >= RECORD_INTERVAL:
             self._last_record = now
