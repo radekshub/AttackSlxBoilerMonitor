@@ -16,13 +16,14 @@ import serial
 import re
 import time
 import math
+import collections
 import winsound  # Windows beep (na Linuxu zakomentovat)
 
-# ── Kalibrace (lineární interpolace mezi dvěma body) ──────────────────────────
+# ── Kalibrace ─────────────────────────────────────────────────────────────────
 CALIB = {
-    "A0": {"v": [1.906, 2.546], "t": [15, 90]},   # Kotel
-    "A1": {"v": [2.058, 2.644], "t": [30, 100]},  # AKU nádrž
-    "A2": {"v": [1.300, 1.857], "t": [16, 200]},  # Komín / spaliny
+    "A0": {"v": [1.906, 2.546], "t": [15, 90]},
+    "A1": {"v": [2.058, 2.644], "t": [30, 100]},
+    "A2": {"v": [1.300, 1.857], "t": [16, 200]},
 }
 
 def voltage_to_temp(channel: str, voltage: float) -> float:
@@ -37,6 +38,7 @@ PANEL_BG  = "#161b22"
 BORDER    = "#30363d"
 TEXT_FG   = "#e6edf3"
 MUTED     = "#8b949e"
+GRID_CLR  = "#21262d"
 ACCENT_K  = "#f97316"
 ACCENT_A  = "#3b82f6"
 ACCENT_S  = "#22c55e"
@@ -48,9 +50,13 @@ GAUGE_MAX = {"A0": 100, "A1": 100, "A2": 250}
 WARNING_AKU     = 70
 WARNING_SPALINY = 160
 
+HISTORY_SECONDS  = 8 * 3600   # 8 hodin
+RECORD_INTERVAL  = 30          # každých 30 s zaznamenat bod
 
+
+# ══════════════════════════════════════════════════════════════════════════════
 class GaugeCanvas(tk.Canvas):
-    """Kruhový gauge – překresluje se proporcionálně při každé změně velikosti."""
+    """Kruhový gauge – proporcionálně se překresluje."""
 
     def __init__(self, parent, channel, color, **kw):
         super().__init__(parent, bg=PANEL_BG, highlightthickness=0, **kw)
@@ -58,10 +64,7 @@ class GaugeCanvas(tk.Canvas):
         self.color     = color
         self._temp     = None
         self._warn_clr = None
-        self.bind("<Configure>", self._on_resize)
-
-    def _on_resize(self, event=None):
-        self._redraw()
+        self.bind("<Configure>", lambda e: self._redraw())
 
     def update_value(self, temp: float, warn_color=None):
         self._temp     = temp
@@ -74,76 +77,189 @@ class GaugeCanvas(tk.Canvas):
         h = self.winfo_height()
         if w < 10 or h < 10:
             return
-
         size = min(w, h)
-        cx   = w / 2
-        cy   = h / 2
+        cx, cy = w / 2, h / 2
+        pad   = size * 0.10
+        arc_w = max(4, int(size * 0.055))
+        x0, y0 = cx - size/2 + pad, cy - size/2 + pad
+        x1, y1 = cx + size/2 - pad, cy + size/2 - pad
 
-        pad    = size * 0.10
-        arc_w  = max(4, int(size * 0.055))
-        x0, y0 = cx - size / 2 + pad, cy - size / 2 + pad
-        x1, y1 = cx + size / 2 - pad, cy + size / 2 - pad
-
-        # Pozadí oblouku (šedá dráha)
         self.create_arc(x0, y0, x1, y1, start=225, extent=-270,
                         style="arc", outline=BORDER, width=arc_w)
 
-        # Min / max popisky
-        font_small = ("Courier New", max(7, int(size * 0.07)))
-        vmin = GAUGE_MIN[self.ch]
-        vmax = GAUGE_MAX[self.ch]
-        self.create_text(x0 + 2, y1 + 4, text=f"{vmin}°",
-                         fill=MUTED, font=font_small, anchor="nw")
-        self.create_text(x1 - 2, y1 + 4, text=f"{vmax}°",
-                         fill=MUTED, font=font_small, anchor="ne")
+        font_s = ("Courier New", max(7, int(size * 0.07)))
+        vmin, vmax = GAUGE_MIN[self.ch], GAUGE_MAX[self.ch]
+        self.create_text(x0+2, y1+4, text=f"{vmin}°", fill=MUTED,
+                         font=font_s, anchor="nw")
+        self.create_text(x1-2, y1+4, text=f"{vmax}°", fill=MUTED,
+                         font=font_s, anchor="ne")
 
+        font_v = ("Courier New", max(10, int(size * 0.14)), "bold")
         if self._temp is None:
-            font_val = ("Courier New", max(10, int(size * 0.14)), "bold")
-            self.create_text(cx, cy, text="–", fill=MUTED, font=font_val)
+            self.create_text(cx, cy, text="–", fill=MUTED, font=font_v)
             return
 
-        arc_color = self._warn_clr if self._warn_clr else self.color
-        frac      = max(0.0, min(1.0, (self._temp - vmin) / (vmax - vmin)))
-        extent    = -270 * frac
-
-        # Barevný oblouk
+        color = self._warn_clr or self.color
+        frac  = max(0.0, min(1.0, (self._temp - vmin) / (vmax - vmin)))
         if frac > 0:
-            self.create_arc(x0, y0, x1, y1, start=225, extent=extent,
-                            style="arc", outline=arc_color, width=arc_w)
+            self.create_arc(x0, y0, x1, y1, start=225, extent=-270*frac,
+                            style="arc", outline=color, width=arc_w)
 
-        # Jehla
         angle_rad = math.radians(225 - 270 * frac)
-        r_needle  = (size / 2 - pad) * 0.80
-        nx = cx + r_needle * math.cos(angle_rad)
-        ny = cy - r_needle * math.sin(angle_rad)
-        needle_w = max(2, int(size * 0.018))
-        self.create_line(cx, cy, nx, ny, fill=arc_color, width=needle_w)
-        dot = max(3, int(size * 0.025))
-        self.create_oval(cx - dot, cy - dot, cx + dot, cy + dot,
-                         fill=arc_color, outline="")
+        r = (size/2 - pad) * 0.80
+        nx = cx + r * math.cos(angle_rad)
+        ny = cy - r * math.sin(angle_rad)
+        self.create_line(cx, cy, nx, ny, fill=color,
+                         width=max(2, int(size * 0.018)))
+        d = max(3, int(size * 0.025))
+        self.create_oval(cx-d, cy-d, cx+d, cy+d, fill=color, outline="")
 
-        # Číselná hodnota a jednotka
-        font_val  = ("Courier New", max(10, int(size * 0.14)), "bold")
-        font_unit = ("Courier New", max(7,  int(size * 0.07)))
-        self.create_text(cx, cy + size * 0.18,
-                         text=f"{self._temp:.1f}",
-                         fill=arc_color, font=font_val)
-        self.create_text(cx, cy + size * 0.32,
-                         text="°C",
-                         fill=arc_color, font=font_unit)
+        self.create_text(cx, cy + size*0.18, text=f"{self._temp:.1f}",
+                         fill=color, font=font_v)
+        self.create_text(cx, cy + size*0.32, text="°C",
+                         fill=color,
+                         font=("Courier New", max(7, int(size*0.07))))
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+class HistoryChart(tk.Canvas):
+    """
+    Čárový graf s osou X = čas (8 h), levá osa Y = 10–100 °C (kotel + AKU),
+    pravá osa Y = 100–250 °C (spaliny). Překresluje se při resize.
+    """
+
+    # okraje plátna
+    PAD_L  = 52   # místo pro levou osu
+    PAD_R  = 52   # místo pro pravou osu
+    PAD_T  = 14
+    PAD_B  = 36   # místo pro osu X
+
+    Y_LEFT_MIN,  Y_LEFT_MAX  = 10,  100
+    Y_RIGHT_MIN, Y_RIGHT_MAX = 100, 250
+
+    def __init__(self, parent, **kw):
+        super().__init__(parent, bg=PANEL_BG, highlightthickness=0, **kw)
+        # deques: každý prvek je (timestamp_float, temp_float)
+        maxlen = HISTORY_SECONDS // RECORD_INTERVAL + 10
+        self._hist = {
+            "A0": collections.deque(maxlen=maxlen),
+            "A1": collections.deque(maxlen=maxlen),
+            "A2": collections.deque(maxlen=maxlen),
+        }
+        self._colors = {"A0": ACCENT_K, "A1": ACCENT_A, "A2": ACCENT_S}
+        self._warn_spaliny = False
+        self.bind("<Configure>", lambda e: self._redraw())
+
+    def add_point(self, temps: dict, warn_spaliny: bool):
+        """Přidá bod do historie. temps = {"A0": float, ...}"""
+        now = time.time()
+        for ch, t in temps.items():
+            if t is not None:
+                self._hist[ch].append((now, t))
+        self._warn_spaliny = warn_spaliny
+        self._redraw()
+
+    def _redraw(self):
+        self.delete("all")
+        w = self.winfo_width()
+        h = self.winfo_height()
+        if w < 40 or h < 40:
+            return
+
+        pl = self.PAD_L
+        pr = self.PAD_R
+        pt = self.PAD_T
+        pb = self.PAD_B
+        cw = w - pl - pr   # šířka grafu
+        ch = h - pt - pb   # výška grafu
+
+        now    = time.time()
+        t_from = now - HISTORY_SECONDS
+
+        def x_pos(ts):
+            return pl + (ts - t_from) / HISTORY_SECONDS * cw
+
+        def y_left(val):
+            frac = (val - self.Y_LEFT_MIN) / (self.Y_LEFT_MAX - self.Y_LEFT_MIN)
+            return pt + ch - frac * ch
+
+        def y_right(val):
+            frac = (val - self.Y_RIGHT_MIN) / (self.Y_RIGHT_MAX - self.Y_RIGHT_MIN)
+            return pt + ch - frac * ch
+
+        # ── mřížka ────────────────────────────────────────────────────────────
+        font_ax = ("Courier New", 8)
+
+        # vodorovné čáry – levá osa (každých 10 °C)
+        for val in range(self.Y_LEFT_MIN, self.Y_LEFT_MAX + 1, 10):
+            y = y_left(val)
+            self.create_line(pl, y, pl+cw, y, fill=GRID_CLR, dash=(2, 4))
+            self.create_text(pl - 4, y, text=str(val), fill=MUTED,
+                             font=font_ax, anchor="e")
+
+        # pravá osa (každých 25 °C)
+        for val in range(self.Y_RIGHT_MIN, self.Y_RIGHT_MAX + 1, 25):
+            y = y_right(val)
+            self.create_text(pl + cw + 4, y, text=str(val), fill=ACCENT_S,
+                             font=font_ax, anchor="w")
+
+        # svislé čáry – každou hodinu
+        for h_ago in range(0, 9):
+            ts = now - h_ago * 3600
+            x  = x_pos(ts)
+            if pl <= x <= pl + cw:
+                self.create_line(x, pt, x, pt+ch, fill=GRID_CLR, dash=(2, 4))
+                label = time.strftime("%-H:%M", time.localtime(ts))
+                self.create_text(x, pt+ch+4, text=label, fill=MUTED,
+                                 font=font_ax, anchor="n")
+
+        # ── rámeček grafu ─────────────────────────────────────────────────────
+        self.create_rectangle(pl, pt, pl+cw, pt+ch, outline=BORDER, width=1)
+
+        # popisky os
+        self.create_text(pl - 40, pt + ch//2, text="°C", fill=MUTED,
+                         font=("Courier New", 9), angle=90, anchor="center")
+        self.create_text(pl + cw + 40, pt + ch//2,
+                         text="°C spaliny", fill=ACCENT_S,
+                         font=("Courier New", 9), angle=90, anchor="center")
+
+        # legenda
+        lx = pl + 8
+        for ch_name, label in [("A0","Kotel"),("A1","AKU"),("A2","Spaliny")]:
+            clr = (ACCENT_SW if ch_name == "A2" and self._warn_spaliny
+                   else self._colors[ch_name])
+            self.create_line(lx, pt+8, lx+18, pt+8, fill=clr, width=2)
+            self.create_text(lx+22, pt+8, text=label, fill=clr,
+                             font=font_ax, anchor="w")
+            lx += 70
+
+        # ── křivky ────────────────────────────────────────────────────────────
+        for ch_name, deq in self._hist.items():
+            pts = [(ts, t) for ts, t in deq if ts >= t_from]
+            if len(pts) < 2:
+                continue
+            clr = (ACCENT_SW if ch_name == "A2" and self._warn_spaliny
+                   else self._colors[ch_name])
+            y_fn = y_right if ch_name == "A2" else y_left
+            coords = []
+            for ts, t in pts:
+                coords += [x_pos(ts), y_fn(t)]
+            self.create_line(coords, fill=clr, width=2, smooth=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("🔥 Kotel Monitor")
         self.configure(bg=BG)
         self.resizable(True, True)
-        self.minsize(480, 320)
+        self.minsize(560, 420)
 
         self._temps       = {"A0": None, "A1": None, "A2": None}
         self._alert_shown = False
         self._running     = True
+        self._last_record = 0.0   # timestamp posledního záznamu do grafu
 
         self._build_ui()
         self._start_serial()
@@ -162,29 +278,25 @@ class App(tk.Tk):
                                     font=("Courier New", 10))
         self._status_lbl.pack(side="right", padx=4)
 
-        # Tři panely s gaugy – grid, roztahují se s oknem
+        # Tři panely s gaugy
         panels = tk.Frame(self, bg=BG)
-        panels.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        panels.pack(fill="both", expand=True, padx=12, pady=(0, 6))
         panels.columnconfigure(0, weight=1)
         panels.columnconfigure(1, weight=1)
         panels.columnconfigure(2, weight=1)
         panels.rowconfigure(0, weight=1)
 
-        channels = [
-            ("A0", "KOTEL",     ACCENT_K),
-            ("A1", "AKU NÁDRŽ", ACCENT_A),
-            ("A2", "SPALINY",   ACCENT_S),
-        ]
+        channels = [("A0","KOTEL",ACCENT_K), ("A1","AKU NÁDRŽ",ACCENT_A),
+                    ("A2","SPALINY",ACCENT_S)]
         self._gauges    = {}
         self._volt_lbls = {}
 
         for col, (ch, name, color) in enumerate(channels):
             panel = tk.Frame(panels, bg=PANEL_BG,
-                             highlightbackground=BORDER,
-                             highlightthickness=1)
+                             highlightbackground=BORDER, highlightthickness=1)
             panel.grid(row=0, column=col, sticky="nsew", padx=6, pady=4)
             panel.columnconfigure(0, weight=1)
-            panel.rowconfigure(1, weight=1)  # gauge row se roztahuje
+            panel.rowconfigure(1, weight=1)
 
             tk.Label(panel, text=name, bg=PANEL_BG, fg=color,
                      font=("Courier New", 12, "bold"), pady=6).grid(
@@ -199,7 +311,18 @@ class App(tk.Tk):
             v_lbl.grid(row=2, column=0)
             self._volt_lbls[ch] = v_lbl
 
-        # Log okno
+        # ── Historický graf ───────────────────────────────────────────────────
+        chart_frame = tk.Frame(self, bg=PANEL_BG,
+                               highlightbackground=BORDER, highlightthickness=1)
+        chart_frame.pack(fill="x", padx=12, pady=(0, 6))
+        tk.Label(chart_frame, text="HISTORIE TEPLOT  (8 h)",
+                 bg=PANEL_BG, fg=MUTED,
+                 font=("Courier New", 9), anchor="w").pack(
+                 fill="x", padx=8, pady=(4, 0))
+        self._chart = HistoryChart(chart_frame, height=180)
+        self._chart.pack(fill="x", padx=6, pady=(2, 6))
+
+        # ── Log ───────────────────────────────────────────────────────────────
         log_frame = tk.Frame(self, bg=PANEL_BG,
                              highlightbackground=BORDER, highlightthickness=1)
         log_frame.pack(fill="x", padx=12, pady=(0, 10))
@@ -265,6 +388,12 @@ class App(tk.Tk):
             warn_color = ACCENT_SW if (ch == "A2" and spaliny_warn) else None
             self._volt_lbls[ch].config(fg=warn_color if warn_color else MUTED)
             self._gauges[ch].update_value(temp, warn_color)
+
+        # Záznam do grafu každých RECORD_INTERVAL sekund
+        now = time.time()
+        if now - self._last_record >= RECORD_INTERVAL:
+            self._last_record = now
+            self._chart.add_point(self._temps.copy(), spaliny_warn)
 
         if spaliny_warn and not self._alert_shown:
             self._alert_shown = True
