@@ -43,7 +43,7 @@ ACCENT_S  = "#22c55e"
 ACCENT_SW = "#ef4444"
 
 GAUGE_MIN = {"A0": 0,   "A1": 0,   "A2": 0}
-GAUGE_MAX = {"A0": 120, "A1": 120, "A2": 400}
+GAUGE_MAX = {"A0": 100, "A1": 100, "A2": 250}
 
 WARNING_AKU     = 70
 WARNING_SPALINY = 160
